@@ -37,7 +37,7 @@ function addMissingPunctuation(str: string) {
 }
 
 /**
- * Returns a random number in the given range.
+ * Returns a random number in the given range (BOTH INCLUSIVE).
  * @param min The minimum resulting value.
  * @param max The maximum resulting value.
  */
@@ -45,7 +45,7 @@ function randomBetween(min: number, max: number): number {
     if (min === max) {
         return min;
     } else {
-        return min + (max - min) * Math.random();
+        return Math.floor(min + (max - min + 1) * Math.random());
     }
 }
 
@@ -77,78 +77,74 @@ export default class MediaWikiAdventureBot {
             maxTimeout: 2500
         });
 	}
-    
-    /**
-     * Gets a random response from the wiki.
-     */
-    public async getRandomResponse(): Promise<string> {
-        const queryResp = await this._wikiAPI.request('query', {
-            list: 'random',
-            rnnamespace: '0|108',
-            rnlimit: 1
-        });
-
-        try {
-            return this.getExcerptOfArticle(queryResp.query.random[0].title);
-        } catch (err) {
-            return this.getRandomResponse();
-        }
-    }
 
     /**
      * Gets a possibly-relevant response. The relevancy of the response depends on the frequency of the words in the
      * response.
      * @param question The input to get a response to.
      */
-    public async getRelevantResponse(question: string): Promise<string> {
+    public async respond(question: string): Promise<string> {
+        const wordTitleCount = Math.floor(randomBetween(MIN_SENTENCES, MAX_SENTENCES));
+        const wordTitles = [];
+
         // Edge case: empty question.
-        if (question === '') {
-            return this.getRandomResponse();
-        }
+        if (question !== '') {
+            const wordFreqs = await this.getWordFreqs(words(question.toLowerCase()));
+            const wordsByFreq = Object.keys(wordFreqs)
+                .filter(word => wordFreqs[word].perMillion < 1000)
+                .sort((a, b) => wordFreqs[a].perMillion - wordFreqs[b].perMillion);
 
-        const wordFreqs = await this.getWordFreqs(words(question.toLowerCase()));
+            // If there are no infrequent words, return a random response.
+            if (wordsByFreq.length > 0) {
+                while (wordTitles.length < wordTitleCount && wordsByFreq.length > 0) {
+                    const currWordTitle = wordsByFreq.splice(0, 1)[0];
 
-        // Edge case: none of the words have frequency data.
-        if (Object.keys(wordFreqs).length === 0) {
-            return this.getRandomResponse();
-        }
-
-        // Find the least-frequent word.
-        let leastFreq: string = undefined;
-        for (const word of Object.keys(wordFreqs)) {
-            if (leastFreq === undefined || wordFreqs[word].perMillion < wordFreqs[leastFreq].perMillion) {
-                leastFreq = word;
-            }
-        }
-
-        // If the least-frequent word is too frequent, return a random response.
-        if (wordFreqs[leastFreq].perMillion > 1.5) {
-            return this.getRandomResponse();
-        }
-
-        try {
-            // Search for the given least-frequent word.
-            const searchResult: any[] = await this._wikiAPI.request('opensearch', {
-                search: leastFreq,
-                namespace: '0|108',
-                limit: 1
-            });
-
-            // If nothing is found, return a random response. Otherwise, return a relevant response.
-            if (searchResult[1].length === 0) {
-                return this.getRandomResponse();
-            } else {
-                try {
-                    return this.getExcerptOfArticle(searchResult[1][0]);
-                } catch (err) {
-                    // Backup in case the found page has more or less no usable text.
-                    return this.getRandomResponse();
+                    try {
+                        const searchResult: any[] = await this._wikiAPI.request('opensearch', {
+                            search: currWordTitle,
+                            namespace: '0|108',
+                            limit: 1
+                        });
+    
+                        if (searchResult[1].length > 0) {
+                            wordTitles.push(currWordTitle);
+                        }
+                    } catch (err) {
+                        // Something went wrong, but oh well ¯\_(ツ)_/¯
+                    }
                 }
             }
-        } catch (err) {
-            // Something went wrong, but who cares ¯\_(ツ)_/¯
-            return this.getRandomResponse();
         }
+
+        if (wordTitles.length < wordTitleCount) {
+            wordTitles.push.apply(wordTitles,
+                await this.getRandomTitles(wordTitleCount - wordTitles.length));
+        }
+
+        return this.fillWithRandom(wordTitles, wordTitleCount);
+    }
+
+    private async fillWithRandom(titles: string[], targetCount: number): Promise<string> {
+        const excerpts: string[] = [];
+        let nextTitles = titles;
+
+        do {
+            if (nextTitles.length < targetCount - excerpts.length) {
+                nextTitles.push.apply(
+                    nextTitles,
+                    await this.getRandomTitles(targetCount - excerpts.length)
+                );
+            }
+
+            const newExcerpts = await this.getArticleExcerpts(nextTitles);
+            excerpts.push.apply(excerpts, newExcerpts.filter(newExcerpt => newExcerpt.length > 0));
+            nextTitles = [];
+        } while (excerpts.length < targetCount);
+
+        return excerpts
+            .map(excerpt => excerpt[Math.floor(Math.random() * excerpt.length)])
+            .map(addMissingPunctuation)
+            .join(' ');
     }
 
     /**
@@ -175,40 +171,41 @@ export default class MediaWikiAdventureBot {
     }
 
     /**
-     * Gets an excerpt of an article. The exceprt consists of multiple sentence(s) from the article.
-     * @param title The title of the article.
+     * Gets a number of random wikipedia titles.
+     * @param count The number of random titles to get.
      */
-    private async getExcerptOfArticle(title: string): Promise<string> {
-        // Get the plaintext on the article & break it into sentences.
+    private async getRandomTitles(count: number = 1) {
+        const queryResp = await this._wikiAPI.request('query', {
+            list: 'random',
+            rnnamespace: '0|108',
+            rnlimit: count
+        });
+
+        return queryResp.query.random.map((randResult: any) => randResult.title);
+    }
+
+    /**
+     * Joins sentences from exceprts of the articles with the given titles.
+     * @param titles The titles of the articles to join together.
+     */
+    private async getArticleExcerpts(titles: string[]): Promise<string[][]> {
         const queryResp = await this._wikiAPI.request('query', {
             prop: 'extracts',
-            titles: title,
+            titles: titles.join('|'),
             redirects: 1,
             exlimit: 1,
             explaintext: 1,
             exsectionformat: 'plain'
         });
-        const articleSentences = sentences(
-            queryResp.query.pages[Object.keys(queryResp.query.pages)[0]].extract,
-            { newline_boundaries: true }
-        ).map(addMissingPunctuation);
+        const articlesSentences = [];
 
-        if (articleSentences.length === 0) {
-            throw new Error('Empty article.');
+        for (const pageId in queryResp.query.pages) {
+            articlesSentences.push(sentences(
+                queryResp.query.pages[pageId].extract,
+                { newline_boundaries: true }
+            ));
         }
 
-        // Reconstruct a select random number of sentences from the article.
-        const targetLength = randomBetween(
-            Math.min(articleSentences.length, MIN_SENTENCES),
-            Math.min(articleSentences.length, MAX_SENTENCES)
-        );
-        const resultSentences = [];
-        while (resultSentences.length < targetLength) {
-            const choiceIndex = Math.floor(Math.random() * articleSentences.length);
-            resultSentences.push(articleSentences[choiceIndex]);
-            articleSentences.splice(choiceIndex, 1);
-        }
-
-        return resultSentences.join(' ');
+        return articlesSentences;
     }
 }

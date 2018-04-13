@@ -16,12 +16,12 @@ async function main() {
     readline.addListener('close', () => readline.close());
 
     // Output a starter message to get the thought juices flowing for the user.
-    console.log(chalk.yellowBright(await bot.getRandomResponse()));
+    console.log(chalk.yellowBright(await bot.respond('')));
 
     const talkLoop = () => {
         readline.question('> ', async userText => {
             console.log('');
-            console.log(chalk.yellowBright(await bot.getRelevantResponse(userText)));
+            console.log(chalk.yellowBright(await bot.respond(userText)));
             talkLoop();
         });
     }

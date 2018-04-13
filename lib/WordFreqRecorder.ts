@@ -112,7 +112,7 @@ export default class WordFreqRecorder {
 	 */
 	private async fetchTransportInfo(): Promise<void> {
 		const resp = await axios.get('https://www.wordsapi.com');
-		const paramsData = resp.data.match(/var when = "([^"]+)",\s+encrypted = "([^"]+)";/);
+		const paramsData = resp.data.match(/var when = '([^']+)';\s+var encrypted = '([^']+)';/);
 
 		this._when = paramsData[1];
 		this._encrypted = paramsData[2];
